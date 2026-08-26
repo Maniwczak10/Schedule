@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>52-Week Auto-Sync Production Scheduler</title>
+<title>52-Week Production Scheduler</title>
 <!-- SheetJS for reading Excel files -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
@@ -99,6 +99,13 @@
   .btn-nav:hover { background: #3e4c5a; }
   .btn-primary { background: #007acc; border-color: #0088e6; }
   .btn-primary:hover { background: #0088e6; }
+  
+  .btn-sync-git {
+    background: #2e7d32;
+    border-color: #388e3c;
+    color: #fff;
+  }
+  .btn-sync-git:hover { background: #388e3c; }
 
   /* Zoom Controls & Steppers */
   .zoom-box {
@@ -123,7 +130,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.1s;
   }
   .btn-zoom-step:hover { background: #374452; }
   .zoom-val-tag {
@@ -135,7 +141,7 @@
     font-family: monospace;
   }
 
-  /* Cloud Sync Status */
+  /* Git Sync Status */
   .sync-status {
     font-size: 11px;
     font-weight: 700;
@@ -291,7 +297,6 @@
   .block-name { white-space: normal; word-break: break-word; font-size: 9.5px; font-weight: 600; }
   .block-qty { font-size: 8.5px; opacity: 0.95; }
 
-  /* Multi-Batch Item List */
   .sub-batches-list {
     display: flex;
     flex-direction: column;
@@ -476,8 +481,10 @@
       <input type="number" id="yearSelector" class="year-input" value="2026" min="2020" max="2035" onchange="onYearChange()" style="width: 60px; background: #111417; border: 1px solid var(--border-color); border-radius: 4px; padding: 4px; text-align: center;">
     </div>
 
+    <!-- Live GitHub Sync & Push Button -->
     <div class="control-group">
-      <span class="sync-status" id="cloudSyncPill">● Connecting to Shared Cloud...</span>
+      <button class="btn-nav btn-sync-git" onclick="saveToGitHub()" title="Commit schedule directly to GitHub">💾 Save to GitHub</button>
+      <span class="sync-status" id="cloudSyncPill">● Checking Cloud...</span>
     </div>
 
     <div class="control-group">
@@ -488,7 +495,7 @@
       <span class="excel-pill inactive" id="excelStatusPill">No Workbook Linked</span>
     </div>
 
-    <!-- Fine-Grained 1px Zoom Stepper with Presets -->
+    <!-- Fine-Grained 1px Zoom Stepper -->
     <div class="control-group">
       <div class="zoom-box">
         <label style="font-size: 11px; color: var(--text-muted); font-weight: 700;">Zoom:</label>
@@ -603,8 +610,13 @@
 </div>
 
 <script>
-  const JSONBIN_BIN_ID = "YOUR_BIN_ID_HERE";   
-  const JSONBIN_API_KEY = "YOUR_API_KEY_HERE"; 
+  /* =========================================================================
+     GITHUB REPOSITORY AUTO-SYNC CONFIGURATION
+     ========================================================================= */
+  const GITHUB_OWNER = "Maniwczak10";
+  const GITHUB_REPO  = "Schedule";
+  const GITHUB_FILE  = "schedule_data.json";
+  const GITHUB_TOKEN = "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"; 
 
   const days = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
   const lines = ["Mod 1", "Mod 2", "Line 1", "Line 2", "Line 3", "Line 4", "Filling 3", "Freeze Dry"];
@@ -613,10 +625,10 @@
   let currentYear = 2026;
   let currentWeek = 38;
   let activeBlockId = null;
+  let currentFileSHA = null;
 
   let excelLookupMap = {};
-  let scheduleStore = JSON.parse(localStorage.getItem("mfg_schedule_store_multibatch_v12") || "{}");
-  let saveTimeout = null;
+  let scheduleStore = JSON.parse(localStorage.getItem("mfg_schedule_store_github_v1") || "{}");
 
   function getWeekKey(yr, wk) {
     return `${yr}-W${wk}`;
@@ -664,30 +676,35 @@
     return getWeekData(currentYear, currentWeek);
   }
 
-  async function fetchCloudSchedule() {
+  /* Load master schedule from GitHub Repository on load */
+  async function fetchGitHubSchedule() {
     const pill = document.getElementById("cloudSyncPill");
-    if (!JSONBIN_BIN_ID || JSONBIN_BIN_ID.includes("YOUR_BIN")) {
-      pill.className = "sync-status";
-      pill.innerText = "● Local Mode (Add Bin ID to enable cloud sync)";
-      renderAll();
-      return;
+    pill.className = "sync-status saving";
+    pill.innerText = "⏳ Loading from GitHub...";
+
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}?ref=main&nocache=${Date.now()}`;
+    const headers = { "Accept": "application/vnd.github.v3+json" };
+    if (GITHUB_TOKEN && !GITHUB_TOKEN.includes("PASTE_")) {
+      headers["Authorization"] = `Bearer ${GITHUB_TOKEN}`;
     }
 
-    pill.className = "sync-status saving";
-    pill.innerText = "⏳ Syncing latest schedule...";
-
     try {
-      const res = await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}/latest`, {
-        headers: { "X-Master-Key": JSONBIN_API_KEY }
-      });
+      const res = await fetch(url, { headers });
       if (res.ok) {
-        const data = await res.json();
-        if (data.record && Object.keys(data.record).length > 0) {
-          scheduleStore = data.record;
-          localStorage.setItem("mfg_schedule_store_multibatch_v12", JSON.stringify(scheduleStore));
+        const fileData = await res.json();
+        currentFileSHA = fileData.sha;
+        const decodedContent = decodeURIComponent(escape(atob(fileData.content)));
+        const parsed = JSON.parse(decodedContent);
+
+        if (parsed && Object.keys(parsed).length > 0) {
+          scheduleStore = parsed;
+          localStorage.setItem("mfg_schedule_store_github_v1", JSON.stringify(scheduleStore));
         }
         pill.className = "sync-status synced";
-        pill.innerText = "✓ Live & Up-to-Date";
+        pill.innerText = "✓ Synced with GitHub";
+      } else if (res.status === 404) {
+        pill.className = "sync-status";
+        pill.innerText = "● Ready to push 1st save";
       } else {
         pill.className = "sync-status error";
         pill.innerText = "⚠ Sync error (Using local backup)";
@@ -699,38 +716,64 @@
     renderAll();
   }
 
-  function saveStore() {
-    localStorage.setItem("mfg_schedule_store_multibatch_v12", JSON.stringify(scheduleStore));
-
+  /* Save and commit directly to GitHub Repository */
+  async function saveToGitHub() {
     const pill = document.getElementById("cloudSyncPill");
-    if (!JSONBIN_BIN_ID || JSONBIN_BIN_ID.includes("YOUR_BIN")) return;
+
+    if (!GITHUB_TOKEN || GITHUB_TOKEN.includes("PASTE_")) {
+      alert("Please paste your GitHub Personal Access Token into GITHUB_TOKEN at line 377 of index.html to enable direct saving to GitHub.");
+      return;
+    }
 
     pill.className = "sync-status saving";
-    pill.innerText = "⏳ Saving changes to cloud...";
+    pill.innerText = "⏳ Pushing to GitHub...";
 
-    clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(async () => {
-      try {
-        const res = await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Master-Key": JSONBIN_API_KEY
-          },
-          body: JSON.stringify(scheduleStore)
-        });
-        if (res.ok) {
-          pill.className = "sync-status synced";
-          pill.innerText = "✓ Changes Saved to Cloud";
-        } else {
-          pill.className = "sync-status error";
-          pill.innerText = "⚠ Save failed (Saved locally)";
-        }
-      } catch (err) {
+    const contentStr = JSON.stringify(scheduleStore, null, 2);
+    const contentBase64 = btoa(unescape(encodeURIComponent(contentStr)));
+
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`;
+    const payload = {
+      message: `Update production schedule [${new Date().toLocaleString()}]`,
+      content: contentBase64,
+      branch: "main"
+    };
+
+    if (currentFileSHA) {
+      payload.sha = currentFileSHA;
+    }
+
+    try {
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "Accept": "application/vnd.github.v3+json",
+          "Authorization": `Bearer ${GITHUB_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const resData = await res.json();
+        currentFileSHA = resData.content.sha;
+        pill.className = "sync-status synced";
+        pill.innerText = "✓ Saved to GitHub!";
+        alert("✓ Master schedule saved and updated for all devices!");
+      } else {
+        const errJson = await res.json();
         pill.className = "sync-status error";
-        pill.innerText = "⚠ Save failed (Saved locally)";
+        pill.innerText = "⚠ Push failed";
+        alert(`Save failed: ${errJson.message || "Check token permissions."}`);
       }
-    }, 600);
+    } catch (err) {
+      pill.className = "sync-status error";
+      pill.innerText = "⚠ Network error";
+      alert("Network error: Could not reach GitHub API.");
+    }
+  }
+
+  function saveStore() {
+    localStorage.setItem("mfg_schedule_store_github_v1", JSON.stringify(scheduleStore));
   }
 
   /* Bi-directional collision & seamless multi-week boundary spanning engine */
@@ -738,7 +781,7 @@
     const data = getCurrentWeekData();
     const lineBlocks = data.blocks.filter(b => b.line === activeBlock.line);
 
-    // 1. Push Left (Backward): Blocks to the left of the active block
+    // Push Left (Backward)
     const leftBlocks = lineBlocks
       .filter(b => String(b.id) !== String(activeBlock.id) && b.start <= activeBlock.start)
       .sort((a, b) => b.start - a.start);
@@ -751,7 +794,7 @@
       currLeft = b.start;
     });
 
-    // 2. Push Right (Forward): Blocks to the right of the active block
+    // Push Right (Forward)
     const rightBlocks = lineBlocks
       .filter(b => String(b.id) !== String(activeBlock.id) && b.start > activeBlock.start)
       .sort((a, b) => a.start - b.start);
@@ -764,13 +807,12 @@
       currRight = b.start + b.span;
     });
 
-    // 3. Process Boundary Transfers & Clean Spanning (Monday & Sunday edges)
+    // Boundary Transfers (Monday & Sunday edges)
     const remainingInCurrent = [];
     let prevWeekData = null;
     let nextWeekData = null;
 
     lineBlocks.forEach(b => {
-      // Case A: Dragged entirely before Monday into previous week
       if (b.start + b.span <= 0) {
         let prevWk = currentWeek - 1;
         let prevYr = currentYear;
@@ -782,7 +824,6 @@
           start: Math.max(0, totalHalfSlots + b.start)
         });
       }
-      // Case B: Straddles Monday (Part in Week 37 Sunday Shift 3, part in Week 38 Monday)
       else if (b.start < 0 && (b.start + b.span) > 0) {
         let prevWk = currentWeek - 1;
         let prevYr = currentYear;
@@ -792,7 +833,6 @@
         const prevSpan = -b.start;
         const currentSpan = b.start + b.span;
 
-        // Portions in previous week's Sunday
         prevWeekData.blocks.push({
           id: Date.now() + Math.floor(Math.random() * 1000),
           line: b.line,
@@ -806,12 +846,10 @@
           theme: b.theme
         });
 
-        // Portion remaining in current week's Monday
         b.start = 0;
         b.span = currentSpan;
         remainingInCurrent.push(b);
       }
-      // Case C: Dragged entirely after Sunday into next week
       else if (b.start >= totalHalfSlots) {
         let nextWk = currentWeek + 1;
         let nextYr = currentYear;
@@ -823,17 +861,10 @@
           start: b.start - totalHalfSlots
         });
       }
-      // Case D: Straddles Sunday (Part in Week 38 Sunday, part in Week 39 Monday)
       else if (b.start < totalHalfSlots && (b.start + b.span) > totalHalfSlots) {
-        let nextWk = currentWeek + 1;
-        let nextYr = currentYear;
-        if (nextWk > 52) { nextWk = 1; nextYr++; }
-        if (!nextWeekData) nextWeekData = getWeekData(nextYr, nextWk);
-
         const currentSpan = totalHalfSlots - b.start;
         const nextSpan = b.span - currentSpan;
 
-        // Portions in next week's Monday
         nextWeekData.blocks.push({
           id: Date.now() + Math.floor(Math.random() * 1000),
           line: b.line,
@@ -847,11 +878,9 @@
           theme: b.theme
         });
 
-        // Portion remaining in current week's Sunday
         b.span = currentSpan;
         remainingInCurrent.push(b);
       }
-      // Case E: Fully inside current week
       else {
         remainingInCurrent.push(b);
       }
@@ -1498,7 +1527,7 @@
   onZoomChange(savedZoom);
 
   populateWeekSelector();
-  fetchCloudSchedule();
+  fetchGitHubSchedule();
 </script>
 </body>
 </html>

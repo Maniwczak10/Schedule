@@ -261,6 +261,7 @@
     font-size: 10.5px;
     line-height: 1.15;
     cursor: grab;
+    touch-action: none;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -271,10 +272,10 @@
   .schedule-block.active-drag {
     z-index: 50 !important;
     opacity: 0.85;
+    cursor: grabbing;
     box-shadow: 0 8px 18px rgba(0,0,0,0.85);
     outline: 2px dashed rgba(255, 255, 255, 0.7);
   }
-  .schedule-block:active { cursor: grabbing; }
 
   .block-header {
     display: flex;
@@ -484,6 +485,7 @@
     <!-- Live GitHub Sync & Push Button -->
     <div class="control-group">
       <button class="btn-nav btn-sync-git" onclick="saveToGitHub()" title="Commit schedule directly to GitHub">💾 Save to GitHub</button>
+      <button class="btn-nav" onclick="promptTokenSetup()" title="Set GitHub Token on this device">🔑 Set Token</button>
       <span class="sync-status" id="cloudSyncPill">● Checking Cloud...</span>
     </div>
 
@@ -610,13 +612,9 @@
 </div>
 
 <script>
-  /* =========================================================================
-     GITHUB REPOSITORY AUTO-SYNC CONFIGURATION
-     ========================================================================= */
   const GITHUB_OWNER = "Maniwczak10";
   const GITHUB_REPO  = "Schedule";
   const GITHUB_FILE  = "schedule_data.json";
-  const GITHUB_TOKEN = "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"; 
 
   const days = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
   const lines = ["Mod 1", "Mod 2", "Line 1", "Line 2", "Line 3", "Line 4", "Filling 3", "Freeze Dry"];
@@ -628,7 +626,21 @@
   let currentFileSHA = null;
 
   let excelLookupMap = {};
-  let scheduleStore = JSON.parse(localStorage.getItem("mfg_schedule_store_github_v1") || "{}");
+  let scheduleStore = JSON.parse(localStorage.getItem("mfg_schedule_store_github_v3") || "{}");
+
+  function getStoredToken() {
+    return localStorage.getItem("gh_pat_token") || "";
+  }
+
+  function promptTokenSetup() {
+    const existing = getStoredToken();
+    const entered = prompt("Enter your GitHub Personal Access Token (starts with github_pat_):", existing);
+    if (entered !== null) {
+      localStorage.setItem("gh_pat_token", entered.trim());
+      alert("✓ Token saved on this device! You can now click 'Save to GitHub'.");
+      fetchGitHubSchedule();
+    }
+  }
 
   function getWeekKey(yr, wk) {
     return `${yr}-W${wk}`;
@@ -676,17 +688,16 @@
     return getWeekData(currentYear, currentWeek);
   }
 
-  /* Load master schedule from GitHub Repository on load */
+  /* Load master schedule from GitHub Repository */
   async function fetchGitHubSchedule() {
     const pill = document.getElementById("cloudSyncPill");
     pill.className = "sync-status saving";
     pill.innerText = "⏳ Loading from GitHub...";
 
+    const token = getStoredToken();
     const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}?ref=main&nocache=${Date.now()}`;
     const headers = { "Accept": "application/vnd.github.v3+json" };
-    if (GITHUB_TOKEN && !GITHUB_TOKEN.includes("PASTE_")) {
-      headers["Authorization"] = `Bearer ${GITHUB_TOKEN}`;
-    }
+    if (token) headers["Authorization"] = `Bearer ${token}`;
 
     try {
       const res = await fetch(url, { headers });
@@ -698,7 +709,7 @@
 
         if (parsed && Object.keys(parsed).length > 0) {
           scheduleStore = parsed;
-          localStorage.setItem("mfg_schedule_store_github_v1", JSON.stringify(scheduleStore));
+          localStorage.setItem("mfg_schedule_store_github_v3", JSON.stringify(scheduleStore));
         }
         pill.className = "sync-status synced";
         pill.innerText = "✓ Synced with GitHub";
@@ -718,13 +729,13 @@
 
   /* Save and commit directly to GitHub Repository */
   async function saveToGitHub() {
-    const pill = document.getElementById("cloudSyncPill");
-
-    if (!GITHUB_TOKEN || GITHUB_TOKEN.includes("PASTE_")) {
-      alert("Please paste your GitHub Personal Access Token into GITHUB_TOKEN at line 377 of index.html to enable direct saving to GitHub.");
+    const token = getStoredToken();
+    if (!token) {
+      promptTokenSetup();
       return;
     }
 
+    const pill = document.getElementById("cloudSyncPill");
     pill.className = "sync-status saving";
     pill.innerText = "⏳ Pushing to GitHub...";
 
@@ -738,16 +749,14 @@
       branch: "main"
     };
 
-    if (currentFileSHA) {
-      payload.sha = currentFileSHA;
-    }
+    if (currentFileSHA) payload.sha = currentFileSHA;
 
     try {
       const res = await fetch(url, {
         method: "PUT",
         headers: {
           "Accept": "application/vnd.github.v3+json",
-          "Authorization": `Bearer ${GITHUB_TOKEN}`,
+          "Authorization": `Bearer ${token}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify(payload)
@@ -758,22 +767,22 @@
         currentFileSHA = resData.content.sha;
         pill.className = "sync-status synced";
         pill.innerText = "✓ Saved to GitHub!";
-        alert("✓ Master schedule saved and updated for all devices!");
+        alert("✓ Master schedule saved to GitHub! All devices viewing this site will see the updates.");
       } else {
         const errJson = await res.json();
         pill.className = "sync-status error";
         pill.innerText = "⚠ Push failed";
-        alert(`Save failed: ${errJson.message || "Check token permissions."}`);
+        alert(`Save failed (${res.status}): ${errJson.message || "Please check your token permissions."}`);
       }
     } catch (err) {
       pill.className = "sync-status error";
       pill.innerText = "⚠ Network error";
-      alert("Network error: Could not reach GitHub API.");
+      alert("Network error: Could not connect to GitHub API.");
     }
   }
 
   function saveStore() {
-    localStorage.setItem("mfg_schedule_store_github_v1", JSON.stringify(scheduleStore));
+    localStorage.setItem("mfg_schedule_store_github_v3", JSON.stringify(scheduleStore));
   }
 
   /* Bi-directional collision & seamless multi-week boundary spanning engine */
@@ -807,7 +816,7 @@
       currRight = b.start + b.span;
     });
 
-    // Boundary Transfers (Monday & Sunday edges)
+    // Boundary Transfers
     const remainingInCurrent = [];
     let prevWeekData = null;
     let nextWeekData = null;
@@ -923,6 +932,7 @@
     }
   }
 
+  /* Exact Spreadsheet Column Mapping */
   function handleExcelUpload(evt) {
     const file = evt.target.files[0];
     if (!file) return;
@@ -942,8 +952,22 @@
 
           if (!rows || rows.length === 0) return;
 
+          // Default index mapping:
+          // H: 7 (FG Lot), I: 8 (FG Mat ID), J: 9 (Bulk Lot), K: 10 (Bulk Mat ID),
+          // L: 11 (Quantity), M: 12 (FGLOT), N: 13 (FG Material Desc), O: 14 (Market), P: 15 (Batch Num)
+          let colMap = {
+            fgLot: 7,
+            fgMatId: 8,
+            bulkLot: 9,
+            bulkMatId: 10,
+            qty: 11,
+            fglotAlt: 12,
+            desc: 13,
+            market: 14,
+            batchNum: 15
+          };
+
           let headerRowIdx = -1;
-          let colMap = {};
 
           for (let r = 0; r < Math.min(rows.length, 10); r++) {
             const row = rows[r];
@@ -951,36 +975,34 @@
 
             row.forEach((cell, cIdx) => {
               const val = String(cell).trim().toUpperCase();
-              if (val.includes("FG LOT") || val.includes("FGLOT")) colMap.fgLot = cIdx;
-              if (val.includes("BATCH NUM") || val.includes("BATCH")) colMap.batchNum = cIdx;
-              if (val.includes("FG MATERIAL DESC") || val.includes("MATERIAL DESC")) colMap.desc = cIdx;
-              if (val.includes("QUANTITY") || val.includes("QTY")) colMap.qty = cIdx;
-              if (val.includes("FG MATERIAL ID")) colMap.fgMatId = cIdx;
+              if (val === "FG LOT" || val === "FGLOT") colMap.fgLot = cIdx;
+              if (val.includes("FG MATERIAL ID") || val.includes("FG MAT ID")) colMap.fgMatId = cIdx;
               if (val.includes("BULK LOT")) colMap.bulkLot = cIdx;
-              if (val.includes("BULK MATERIAL ID")) colMap.bulkMatId = cIdx;
+              if (val.includes("BULK MATERIAL ID") || val.includes("BULK MAT ID")) colMap.bulkMatId = cIdx;
+              if (val === "QUANTITY" || val === "QTY") colMap.qty = cIdx;
+              if (val.includes("FG MATERIAL DESC") || val.includes("MATERIAL DESC")) colMap.desc = cIdx;
+              if (val === "MARKET") colMap.market = cIdx;
+              if (val.includes("BATCH NUM") || val.includes("BATCH NUMBER") || val === "BATCH") colMap.batchNum = cIdx;
             });
 
-            if ((colMap.fgLot !== undefined || colMap.batchNum !== undefined) && (colMap.desc !== undefined || colMap.qty !== undefined)) {
+            if (colMap.fgLot !== undefined && colMap.desc !== undefined) {
               headerRowIdx = r;
               break;
             }
           }
 
-          if (headerRowIdx === -1) {
-            headerRowIdx = 0;
-            colMap = { fgLot: 7, fgMatId: 8, bulkLot: 9, bulkMatId: 10, qty: 11, desc: 13, batchNum: 15 };
-          }
+          if (headerRowIdx === -1) headerRowIdx = 0;
 
           for (let r = headerRowIdx + 1; r < rows.length; r++) {
             const row = rows[r];
             if (!Array.isArray(row) || row.length === 0) continue;
 
-            const fgLotVal   = colMap.fgLot !== undefined && row[colMap.fgLot] ? String(row[colMap.fgLot]).trim() : "";
-            const batchVal   = colMap.batchNum !== undefined && row[colMap.batchNum] ? String(row[colMap.batchNum]).trim() : "";
-            const descVal    = colMap.desc !== undefined && row[colMap.desc] ? String(row[colMap.desc]).trim() : "";
-            const qtyVal     = colMap.qty !== undefined && row[colMap.qty] ? String(row[colMap.qty]).trim() : "";
-            const fgMatIdVal = colMap.fgMatId !== undefined && row[colMap.fgMatId] ? String(row[colMap.fgMatId]).trim() : "";
-            const bulkLotVal = colMap.bulkLot !== undefined && row[colMap.bulkLot] ? String(row[colMap.bulkLot]).trim() : "";
+            const fgLotVal   = row[colMap.fgLot] ? String(row[colMap.fgLot]).trim() : "";
+            const fgMatIdVal = row[colMap.fgMatId] ? String(row[colMap.fgMatId]).trim() : "";
+            const bulkLotVal = row[colMap.bulkLot] ? String(row[colMap.bulkLot]).trim() : "";
+            const qtyVal     = row[colMap.qty] ? String(row[colMap.qty]).trim() : "";
+            const descVal    = row[colMap.desc] ? String(row[colMap.desc]).trim() : "";
+            const batchVal   = row[colMap.batchNum] ? String(row[colMap.batchNum]).trim() : "";
 
             const primaryKey = fgLotVal || batchVal;
             if (!primaryKey || primaryKey.toUpperCase().includes("FG LOT") || primaryKey.toUpperCase().includes("BATCH")) continue;
@@ -1236,13 +1258,15 @@
       el.appendChild(hr);
 
       updateBlockStyle(el, b.start, b.span);
-      attachInteractions(el, b);
+      attachPointerInteractions(el, b);
 
+      el.querySelector(".btn-edit-icon").addEventListener("pointerdown", (e) => e.stopPropagation());
       el.querySelector(".btn-edit-icon").addEventListener("click", (e) => {
         e.stopPropagation();
         openEditModal(b.id);
       });
 
+      el.querySelector(".btn-copy-icon").addEventListener("pointerdown", (e) => e.stopPropagation());
       el.querySelector(".btn-copy-icon").addEventListener("click", (e) => {
         e.stopPropagation();
         copyBlock(b.id);
@@ -1258,12 +1282,13 @@
     el.style.width = `calc(${span * slotPct}% - 4px)`;
   }
 
-  function attachInteractions(el, block) {
+  /* Reliable Pointer-Capture Interaction Engine (Fixes Drag Stickiness) */
+  function attachPointerInteractions(el, block) {
     let mode = null;
     let startX = 0, startY = 0, initialStart = 0, initialSpan = 0, initialLine = 0;
     let hasMoved = false;
 
-    el.addEventListener("mousedown", (e) => {
+    el.onpointerdown = function(e) {
       if (e.target.tagName === "INPUT" || e.button !== 0 || e.target.classList.contains("block-btn")) return;
       e.stopPropagation();
 
@@ -1283,12 +1308,13 @@
       else mode = "drag";
 
       let currentTargetLine = initialLine;
+      el.setPointerCapture(e.pointerId);
 
-      function onMouseMove(moveEvent) {
+      el.onpointermove = function(moveEvent) {
         const deltaX = moveEvent.clientX - startX;
         const deltaY = moveEvent.clientY - startY;
 
-        if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+        if (!hasMoved && (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4)) {
           hasMoved = true;
           el.classList.add("active-drag");
         }
@@ -1325,9 +1351,13 @@
         block.line = currentTargetLine;
 
         updateBlockStyle(el, block.start, block.span);
-      }
+      };
 
-      function onMouseUp(upEvent) {
+      function endDrag(upEvent) {
+        try { el.releasePointerCapture(upEvent.pointerId); } catch(err){}
+        el.onpointermove = null;
+        el.onpointerup = null;
+        el.onpointercancel = null;
         el.classList.remove("active-drag");
 
         if (hasMoved && mode) {
@@ -1338,13 +1368,11 @@
         }
 
         mode = null;
-        window.removeEventListener("mousemove", onMouseMove);
-        window.removeEventListener("mouseup", onMouseUp);
       }
 
-      window.addEventListener("mousemove", onMouseMove);
-      window.addEventListener("mouseup", onMouseUp);
-    });
+      el.onpointerup = endDrag;
+      el.onpointercancel = endDrag;
+    };
   }
 
   function addSubBatchRow(lotVal = "", matVal = "", qtyVal = "") {

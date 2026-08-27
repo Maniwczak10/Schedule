@@ -740,7 +740,7 @@
     localStorage.setItem("mfg_schedule_store_github_v3", JSON.stringify(scheduleStore));
   }
 
-  /* Collision & boundary transfer engine */
+  /* Bi-directional collision & seamless multi-week boundary spanning engine */
   function resolveCollisionsOnDrop(activeBlock, direction = "forward") {
     const data = getCurrentWeekData();
     const lineBlocks = data.blocks.filter(b => b.line === activeBlock.line);
@@ -771,14 +771,16 @@
 
     lineBlocks.forEach(b => {
       if (b.start + b.span <= 0) {
-        let prevWk = currentWeek - 1, prevYr = currentYear;
+        let prevWk = currentWeek - 1;
+        let prevYr = currentYear;
         if (prevWk < 1) { prevWk = 52; prevYr--; }
         if (!prevWeekData) prevWeekData = getWeekData(prevYr, prevWk);
 
         prevWeekData.blocks.push({ ...b, start: Math.max(0, totalHalfSlots + b.start) });
       }
       else if (b.start < 0 && (b.start + b.span) > 0) {
-        let prevWk = currentWeek - 1, prevYr = currentYear;
+        let prevWk = currentWeek - 1;
+        let prevYr = currentYear;
         if (prevWk < 1) { prevWk = 52; prevYr--; }
         if (!prevWeekData) prevWeekData = getWeekData(prevYr, prevWk);
 
@@ -803,14 +805,16 @@
         remainingInCurrent.push(b);
       }
       else if (b.start >= totalHalfSlots) {
-        let nextWk = currentWeek + 1, nextYr = currentYear;
+        let nextWk = currentWeek + 1;
+        let nextYr = currentYear;
         if (nextWk > 52) { nextWk = 1; nextYr++; }
         if (!nextWeekData) nextWeekData = getWeekData(nextYr, nextWk);
 
         nextWeekData.blocks.push({ ...b, start: b.start - totalHalfSlots });
       }
       else if (b.start < totalHalfSlots && (b.start + b.span) > totalHalfSlots) {
-        let nextWk = currentWeek + 1, nextYr = currentYear;
+        let nextWk = currentWeek + 1;
+        let nextYr = currentYear;
         if (nextWk > 52) { nextWk = 1; nextYr++; }
         if (!nextWeekData) nextWeekData = getWeekData(nextYr, nextWk);
 
@@ -872,12 +876,20 @@
     if (activeBlockId !== null) { copyBlock(activeBlockId); closeModal(); }
   }
 
-  /* UPDATED Excel reader: aligned to H/I (and optional J/L/M/N/O). Ignores K. */
+  /* UPDATED Excel Reader (handles line breaks/spaces in headers; ignores K) */
   function handleExcelUpload(evt) {
     const file = evt.target.files?.[0];
     if (!file) return;
 
     const reader = new FileReader();
+
+    const norm = (v) =>
+      String(v ?? "")
+        .replace(/\u00A0/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toUpperCase();
+
     reader.onload = function(e) {
       try {
         const data = new Uint8Array(e.target.result);
@@ -888,62 +900,76 @@
 
         workbook.SheetNames.forEach(sheetName => {
           const sheet = workbook.Sheets[sheetName];
+          if (!sheet || !sheet["!ref"]) return;
+
           const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
           if (!rows || rows.length === 0) return;
 
-          // Defaults for your screenshot (0-based):
-          // H:7 FGLOT | I:8 FG MATERIAL ID | J:9 BULK LOT | K:10 BULK Material ID (ignored)
-          // L:11 QUANTITY | M:12 FG MATERIAL DESC | N:13 MARKET | O:14 BATCH NUM
+          // 0-based defaults for your screenshot:
+          // H=7 FG LOT | I=8 FG MATERIAL ID | J=9 BULK LOT | K=10 (ignored)
+          // L=11 QUANTITY | M=12 FG MATERIAL DESC | N=13 MARKET | O=14 BATCH NUM
           let colMap = {
             fgLot: 7,
             fgMatId: 8,
-            bulkLot: 9,   // optional
+            bulkLot: 9,
             qty: 11,
             desc: 12,
-            market: 13,   // optional
-            batchNum: 14  // optional
+            market: 13,
+            batchNum: 14
           };
 
-          // Find header row by detecting FGLOT + DESC (more reliable than the old logic)
+          // Find header row (scan top 60 rows)
           let headerRowIdx = -1;
-          const maxScan = Math.min(rows.length, 25);
+          const scanMax = Math.min(rows.length, 60);
 
-          for (let r = 0; r < maxScan; r++) {
+          for (let r = 0; r < scanMax; r++) {
             const row = rows[r];
             if (!Array.isArray(row)) continue;
 
-            let hasFG = false, hasDesc = false;
+            const nrow = row.map(norm);
 
-            row.forEach((cell, cIdx) => {
-              const val = String(cell).trim().toUpperCase();
+            const hasFgLot = nrow.includes("FG LOT") || nrow.includes("FGLOT");
+            const hasDesc =
+              nrow.includes("FG MATERIAL DESC") ||
+              nrow.some(x => x.includes("FG MATERIAL DESC")) ||
+              nrow.some(x => x === "MATERIAL DESC" || x.endsWith("MATERIAL DESC"));
 
-              if (val === "FGLOT" || val === "FG LOT") { colMap.fgLot = cIdx; hasFG = true; }
-              else if (val.includes("FG MATERIAL ID") || val.includes("FG MAT ID")) { colMap.fgMatId = cIdx; }
-              else if (val.includes("BULK LOT")) { colMap.bulkLot = cIdx; }
-              else if (val === "QUANTITY" || val === "QTY") { colMap.qty = cIdx; }
-              else if (val.includes("FG MATERIAL DESC") || val.includes("MATERIAL DESC")) { colMap.desc = cIdx; hasDesc = true; }
-              else if (val === "MARKET") { colMap.market = cIdx; }
-              else if (val.includes("BATCH NUM") || val.includes("BATCH NUMBER") || val === "BATCH") { colMap.batchNum = cIdx; }
-            });
+            if (!(hasFgLot && hasDesc)) continue;
 
-            if (hasFG && hasDesc) { headerRowIdx = r; break; }
+            // Build colMap from detected header row
+            for (let c = 0; c < nrow.length; c++) {
+              const h = nrow[c];
+
+              if (h === "FG LOT" || h === "FGLOT") colMap.fgLot = c;
+              else if (h.includes("FG MATERIAL ID") || h.includes("FG MAT ID")) colMap.fgMatId = c;
+              else if (h === "BULK LOT" || h.includes("BULK LOT")) colMap.bulkLot = c;
+              else if (h === "QUANTITY" || h === "QTY") colMap.qty = c;
+              else if (h.includes("FG MATERIAL DESC") || h.includes("MATERIAL DESC")) colMap.desc = c;
+              else if (h === "MARKET") colMap.market = c;
+              else if (h.includes("BATCH NUM") || h.includes("BATCH NUMBER") || h === "BATCH") colMap.batchNum = c;
+              // K (Bulk Material ID) intentionally ignored
+            }
+
+            headerRowIdx = r;
+            break;
           }
 
-          if (headerRowIdx === -1) headerRowIdx = 0;
+          const startRow = headerRowIdx >= 0 ? headerRowIdx + 1 : 0;
 
-          for (let r = headerRowIdx + 1; r < rows.length; r++) {
+          for (let r = startRow; r < rows.length; r++) {
             const row = rows[r];
-            if (!Array.isArray(row) || row.length === 0) continue;
+            if (!Array.isArray(row)) continue;
 
-            const fgLotVal   = row[colMap.fgLot]   ? String(row[colMap.fgLot]).trim()   : "";
-            const fgMatIdVal = row[colMap.fgMatId] ? String(row[colMap.fgMatId]).trim() : "";
-            const bulkLotVal = row[colMap.bulkLot] ? String(row[colMap.bulkLot]).trim() : "";
-            const qtyVal     = row[colMap.qty]     ? String(row[colMap.qty]).trim()     : "";
-            const descVal    = row[colMap.desc]    ? String(row[colMap.desc]).trim()    : "";
-            const marketVal  = row[colMap.market]  ? String(row[colMap.market]).trim()  : "";
-            const batchVal   = row[colMap.batchNum]? String(row[colMap.batchNum]).trim(): "";
+            const fgLotVal = row[colMap.fgLot] != null ? String(row[colMap.fgLot]).trim() : "";
+            const batchVal = row[colMap.batchNum] != null ? String(row[colMap.batchNum]).trim() : "";
 
             if (!fgLotVal && !batchVal) continue;
+
+            const fgMatIdVal = row[colMap.fgMatId] != null ? String(row[colMap.fgMatId]).trim() : "";
+            const bulkLotVal = row[colMap.bulkLot] != null ? String(row[colMap.bulkLot]).trim() : "";
+            const qtyVal = row[colMap.qty] != null ? String(row[colMap.qty]).trim() : "";
+            const descVal = row[colMap.desc] != null ? String(row[colMap.desc]).trim() : "";
+            const marketVal = row[colMap.market] != null ? String(row[colMap.market]).trim() : "";
 
             const entry = {
               lot: fgLotVal || batchVal,
@@ -968,9 +994,8 @@
           pill.innerText = `✓ ${file.name} (${totalCount} batches linked)`;
         } else {
           pill.className = "excel-pill inactive";
-          pill.innerText = `⚠ 0 batches found (Check Sheet/Columns)`;
+          pill.innerText = `⚠ 0 batches found (Header not detected / empty keys)`;
         }
-
       } catch (err) {
         console.error("Excel Read Error:", err);
         const pill = document.getElementById("excelStatusPill");
